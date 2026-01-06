@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- マイクアクセスの使用目的説明（必須） -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>EarThruは外音取り込みのためにマイクを使用します。マイクからの音声をリアルタイムでイヤホンに出力します。</string>
+    
+    <!-- Dockにアイコンを表示しない（メニューバーのみ） -->
+    <key>LSUIElement</key>
+    <true/>
+    
+    <!-- 最小対応macOSバージョン -->
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    
+    <!-- バンドル識別子 -->
+    <key>CFBundleIdentifier</key>
+    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    
+    <!-- バンドル名 -->
+    <key>CFBundleName</key>
+    <string>$(PRODUCT_NAME)</string>
+    
+    <!-- バージョン情報 -->
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    
+    <!-- 実行ファイル名 -->
+    <key>CFBundleExecutable</key>
+    <string>$(EXECUTABLE_NAME)</string>
+    
+    <!-- パッケージタイプ -->
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+</dict>
+</plist>

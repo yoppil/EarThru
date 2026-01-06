@@ -1,5 +1,7 @@
 # EarThru for Mac
 
+> **🚧 Beta Version 1.0.0-beta.1**
+
 外音取り込み（パススルー）専用の macOS メニューバーアプリ。
 
 マイクで拾った音をリアルタイムでイヤホンに流し、周囲の音を聞きながら作業できます。
@@ -81,7 +83,7 @@ Xcodeで：
 ## ファイル構成
 
 ```
-OpenEar/
+EarThru/
 ├── EarThruApp.swift          # エントリーポイント（MenuBarExtra）
 ├── Models/
 │   ├── AudioModel.swift      # AVAudioEngineパススルーロジック

@@ -76,6 +76,16 @@ class AudioModel: ObservableObject {
     /// デバッグモード（レベルメーター表示）
     @Published var isDebugMode: Bool = false
     
+    /// 音声分離モード（Voice Processing）が有効か
+    /// 有効時: ノイズ抑制・エコーキャンセレーションで人の声をクリアに
+    @Published var isVoiceIsolationEnabled: Bool = true {
+        didSet {
+            if isPassthroughEnabled {
+                restartPassthrough()
+            }
+        }
+    }
+    
     // MARK: - Private Properties
     
     private var audioEngine: AVAudioEngine
@@ -140,7 +150,8 @@ class AudioModel: ObservableObject {
         audioEngine.disconnectNodeInput(audioEngine.mainMixerNode)
         
         do {
-            try audioEngine.inputNode.setVoiceProcessingEnabled(false)
+            try audioEngine.inputNode.setVoiceProcessingEnabled(isVoiceIsolationEnabled)
+            print("Voice Processing: \(isVoiceIsolationEnabled ? "有効" : "無効")")
         } catch {
             print("Voice processing設定エラー: \(error)")
         }

@@ -55,6 +55,16 @@ struct ContentView: View {
             .toggleStyle(.switch)
             .disabled(audioModel.showBuiltInSpeakerWarning)
             
+            // Voice Isolation トグル
+            Toggle(isOn: $audioModel.isVoiceIsolationEnabled) {
+                HStack {
+                    Image(systemName: audioModel.isVoiceIsolationEnabled ? "waveform.badge.mic" : "waveform")
+                        .foregroundColor(audioModel.isVoiceIsolationEnabled ? .purple : .secondary)
+                    Text("ノイズ除去")
+                }
+            }
+            .toggleStyle(.switch)
+            
             Divider()
             
             // 音量スライダー

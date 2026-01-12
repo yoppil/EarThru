@@ -55,15 +55,30 @@ struct ContentView: View {
             .toggleStyle(.switch)
             .disabled(audioModel.showBuiltInSpeakerWarning)
             
-            // Voice Isolation トグル
-            Toggle(isOn: $audioModel.isVoiceIsolationEnabled) {
-                HStack {
-                    Image(systemName: audioModel.isVoiceIsolationEnabled ? "waveform.badge.mic" : "waveform")
-                        .foregroundColor(audioModel.isVoiceIsolationEnabled ? .purple : .secondary)
-                    Text("ノイズ除去")
+            // ノイズゲート トグル＆スライダー
+            VStack(alignment: .leading, spacing: 4) {
+                Toggle(isOn: $audioModel.isNoiseGateEnabled) {
+                    HStack {
+                        Image(systemName: audioModel.isNoiseGateEnabled ? "waveform.badge.minus" : "waveform")
+                            .foregroundColor(audioModel.isNoiseGateEnabled ? .purple : .secondary)
+                        Text("ノイズゲート")
+                    }
+                }
+                .toggleStyle(.switch)
+                
+                if audioModel.isNoiseGateEnabled {
+                    HStack {
+                        Text("閾値")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Slider(value: $audioModel.noiseGateThreshold, in: 0...0.1, step: 0.005)
+                        Text(String(format: "%.0f%%", audioModel.noiseGateThreshold * 100))
+                            .font(.caption)
+                            .monospacedDigit()
+                            .frame(width: 30)
+                    }
                 }
             }
-            .toggleStyle(.switch)
             
             Divider()
             
@@ -170,6 +185,22 @@ struct ContentView: View {
                             }
                         }
                         .frame(height: 8)
+                        
+                        Divider()
+                            .padding(.vertical, 4)
+                        
+                        // レイテンシー表示
+                        HStack {
+                            Image(systemName: "timer")
+                                .foregroundColor(.orange)
+                            Text("レイテンシー")
+                                .font(.caption)
+                            Spacer()
+                            Text(String(format: "%.1f ms", audioModel.latencyMs))
+                                .font(.caption)
+                                .monospacedDigit()
+                                .foregroundColor(audioModel.latencyMs < 10 ? .green : (audioModel.latencyMs < 20 ? .yellow : .red))
+                        }
                     }
                     .padding(8)
                     .background(Color.blue.opacity(0.05))

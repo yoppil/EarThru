@@ -74,11 +74,19 @@ class AudioModel: ObservableObject {
     @Published var inputLevel: Float = 0.0
     
     /// デバッグモード（レベルメーター表示）
-    @Published var isDebugMode: Bool = false
+    @Published var isDebugMode: Bool = false {
+        didSet {
+            if isDebugMode && isPassthroughEnabled {
+                updateLatencyMeasurement()
+            }
+        }
+    }
     
-    /// 音声分離モード（Voice Processing）が有効か
-    /// 有効時: ノイズ抑制・エコーキャンセレーションで人の声をクリアに
-    @Published var isVoiceIsolationEnabled: Bool = true {
+    /// 推定レイテンシー（ミリ秒）
+    @Published var latencyMs: Double = 0.0
+    
+    /// ノイズゲートが有効か
+    @Published var isNoiseGateEnabled: Bool = false {
         didSet {
             if isPassthroughEnabled {
                 restartPassthrough()
@@ -86,12 +94,24 @@ class AudioModel: ObservableObject {
         }
     }
     
+    /// ノイズゲートの閾値（0.0〜0.1）- これ以下の音量をミュート
+    @Published var noiseGateThreshold: Float = 0.02
+    
     // MARK: - Private Properties
     
     private var audioEngine: AVAudioEngine
     private var mixerNode: AVAudioMixerNode
     private var deviceManager: AudioDeviceManager
     private var cancellables = Set<AnyCancellable>()
+    
+    /// 低レイテンシー用のバッファサイズ（128フレーム ≈ 2.9ms @ 44.1kHz）
+    private let preferredBufferSize: UInt32 = 128
+    
+    /// High-Pass Filter（80Hz以下をカット）
+    private var highPassFilter: AVAudioUnitEQ!
+    
+    /// ノイズゲート用のスムージング係数
+    private var gateSmoothing: Float = 1.0
     
     // MARK: - Initialization
     
@@ -141,20 +161,21 @@ class AudioModel: ObservableObject {
     private func setupAudioEngine() {
         // ミキサーノードをエンジンに接続
         audioEngine.attach(mixerNode)
+        
+        // High-Pass Filterを作成（80Hz以下をカット）
+        highPassFilter = AVAudioUnitEQ(numberOfBands: 1)
+        highPassFilter.bands[0].filterType = .highPass
+        highPassFilter.bands[0].frequency = 80.0
+        highPassFilter.bands[0].bypass = false
+        audioEngine.attach(highPassFilter)
     }
     
     /// オーディオエンジンのノード接続を構築
     private func connectNodes() {
         // 既存の接続をリセット
         audioEngine.disconnectNodeInput(mixerNode)
+        audioEngine.disconnectNodeInput(highPassFilter)
         audioEngine.disconnectNodeInput(audioEngine.mainMixerNode)
-        
-        do {
-            try audioEngine.inputNode.setVoiceProcessingEnabled(isVoiceIsolationEnabled)
-            print("Voice Processing: \(isVoiceIsolationEnabled ? "有効" : "無効")")
-        } catch {
-            print("Voice processing設定エラー: \(error)")
-        }
         
         // 入力ノードのフォーマットを取得
         let inputFormat = audioEngine.inputNode.outputFormat(forBus: 0)
@@ -167,14 +188,75 @@ class AudioModel: ObservableObject {
         
         print("入力フォーマット: \(inputFormat)")
         
-        // 入力 → ミキサー → 出力の接続
-        audioEngine.connect(audioEngine.inputNode, to: mixerNode, format: inputFormat)
-        audioEngine.connect(mixerNode, to: audioEngine.mainMixerNode, format: inputFormat)
+        if isNoiseGateEnabled {
+            // ノイズゲート有効: 入力 → HPF → ミキサー → 出力
+            audioEngine.connect(audioEngine.inputNode, to: highPassFilter, format: inputFormat)
+            audioEngine.connect(highPassFilter, to: mixerNode, format: inputFormat)
+            audioEngine.connect(mixerNode, to: audioEngine.mainMixerNode, format: inputFormat)
+            
+            // ノイズゲート処理用のtapをインストール
+            installNoiseGateTap(format: inputFormat)
+            print("ノイズゲート: 有効 (閾値: \(noiseGateThreshold))")
+        } else {
+            // ノイズゲート無効: 入力 → ミキサー → 出力
+            audioEngine.connect(audioEngine.inputNode, to: mixerNode, format: inputFormat)
+            audioEngine.connect(mixerNode, to: audioEngine.mainMixerNode, format: inputFormat)
+            print("ノイズゲート: 無効")
+        }
         
         // デバッグモードが有効ならレベルメーターをインストール
         if isDebugMode {
             installLevelMeter()
         }
+    }
+    
+    /// ノイズゲート処理用のtapをインストール
+    private func installNoiseGateTap(format: AVAudioFormat) {
+        let bufferSize: AVAudioFrameCount = 256
+        
+        highPassFilter.installTap(onBus: 0, bufferSize: bufferSize, format: format) { [weak self] buffer, _ in
+            guard let self = self else { return }
+            self.applyNoiseGate(to: buffer)
+        }
+    }
+    
+    /// ノイズゲートを適用（閾値以下の音をフェードアウト）
+    private func applyNoiseGate(to buffer: AVAudioPCMBuffer) {
+        guard let channelData = buffer.floatChannelData else { return }
+        
+        let channelCount = Int(buffer.format.channelCount)
+        let frameLength = Int(buffer.frameLength)
+        let threshold = noiseGateThreshold
+        
+        // RMSを計算
+        var totalPower: Float = 0.0
+        for channel in 0..<channelCount {
+            let samples = channelData[channel]
+            for frame in 0..<frameLength {
+                totalPower += samples[frame] * samples[frame]
+            }
+        }
+        let rms = sqrt(totalPower / Float(frameLength * channelCount))
+        
+        // ゲートの開閉をスムーズに
+        let targetGain: Float = rms > threshold ? 1.0 : 0.0
+        let smoothingFactor: Float = 0.1
+        gateSmoothing = gateSmoothing + smoothingFactor * (targetGain - gateSmoothing)
+        
+        // ゲインを適用
+        if gateSmoothing < 0.99 {
+            for channel in 0..<channelCount {
+                let samples = channelData[channel]
+                for frame in 0..<frameLength {
+                    samples[frame] *= gateSmoothing
+                }
+            }
+        }
+    }
+    
+    /// ノイズゲートのtapを削除
+    private func removeNoiseGateTap() {
+        highPassFilter.removeTap(onBus: 0)
     }
     
     /// オーディオレベルメーターをインストール
@@ -191,7 +273,7 @@ class AudioModel: ObservableObject {
             return
         }
         
-        let bufferSize: AVAudioFrameCount = 1024
+        let bufferSize: AVAudioFrameCount = 256
         
         // mixerNodeにタップをインストール
         mixerNode.installTap(onBus: 0, bufferSize: bufferSize, format: format) { [weak self] buffer, _ in
@@ -303,6 +385,11 @@ class AudioModel: ObservableObject {
             // エンジン開始
             try audioEngine.start()
             print("パススルー開始成功")
+            
+            // レイテンシー計測
+            if isDebugMode {
+                updateLatencyMeasurement()
+            }
         } catch {
             print("オーディオエンジン起動エラー: \(error)")
             isPassthroughEnabled = false
@@ -310,22 +397,28 @@ class AudioModel: ObservableObject {
     }
     
     private func stopPassthrough() {
-        // レベルメーターを削除
+        // tapを削除
         removeLevelMeter()
+        if isNoiseGateEnabled {
+            removeNoiseGateTap()
+        }
         audioEngine.stop()
         // 接続をリセット
         audioEngine.disconnectNodeInput(mixerNode)
+        audioEngine.disconnectNodeInput(highPassFilter)
         audioEngine.disconnectNodeInput(audioEngine.mainMixerNode)
         // レベルをリセット
         inputLevel = 0.0
+        latencyMs = 0.0
+        gateSmoothing = 1.0
         print("パススルー停止")
     }
     
     private func restartPassthrough() {
         stopPassthrough()
         
-        // 少し待ってから再起動
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+        // 最小限の待機で再起動
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
             self?.startPassthrough()
         }
     }
@@ -336,33 +429,36 @@ class AudioModel: ObservableObject {
         // 既存のエンジンを停止
         audioEngine.stop()
         
-        // システムのデフォルトデバイスを変更（AudioUnit直接設定より安定）
+        // システムのデフォルトデバイスを変更
         if let inputDevice = selectedInputDevice {
             print("システムデフォルト入力設定: \(inputDevice.name) (ID: \(inputDevice.id))")
             setSystemDefaultInputDevice(inputDevice.id)
+            setDeviceBufferSize(inputDevice.id, frameSize: preferredBufferSize)
         }
         
         if let outputDevice = selectedOutputDevice {
             print("システムデフォルト出力設定: \(outputDevice.name) (ID: \(outputDevice.id))")
             setSystemDefaultOutputDevice(outputDevice.id)
+            setDeviceBufferSize(outputDevice.id, frameSize: preferredBufferSize)
         }
         
-        // デバイス変更の反映を待つ
-        Thread.sleep(forTimeInterval: 0.2)
-        
-        // 新しいエンジンを作成（デバイス設定後）
+        // 新しいエンジンを作成
         audioEngine = AVAudioEngine()
         mixerNode = AVAudioMixerNode()
         
         // ミキサーノードをアタッチ
         audioEngine.attach(mixerNode)
         
+        // High-Pass Filterを再作成
+        highPassFilter = AVAudioUnitEQ(numberOfBands: 1)
+        highPassFilter.bands[0].filterType = .highPass
+        highPassFilter.bands[0].frequency = 80.0
+        highPassFilter.bands[0].bypass = false
+        audioEngine.attach(highPassFilter)
+        
         // inputNode/outputNodeにアクセスしてAudioUnitを初期化
         _ = audioEngine.inputNode
         _ = audioEngine.outputNode
-        
-        // 少し待つ
-        Thread.sleep(forTimeInterval: 0.1)
         
         // ノード接続を構築
         connectNodes()
@@ -371,6 +467,31 @@ class AudioModel: ObservableObject {
         mixerNode.outputVolume = volume
         
         print("エンジン再構成完了")
+    }
+    
+    /// デバイスのバッファサイズを設定（低レイテンシー化）
+    private func setDeviceBufferSize(_ deviceID: AudioDeviceID, frameSize: UInt32) {
+        var frameSize = frameSize
+        var propertyAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyBufferFrameSize,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        
+        let status = AudioObjectSetPropertyData(
+            deviceID,
+            &propertyAddress,
+            0,
+            nil,
+            UInt32(MemoryLayout<UInt32>.size),
+            &frameSize
+        )
+        
+        if status == noErr {
+            print("バッファサイズ設定成功: \(frameSize)フレーム")
+        } else {
+            print("バッファサイズ設定エラー: \(status)")
+        }
     }
     
     /// システムのデフォルト入力デバイスを設定
@@ -432,6 +553,56 @@ class AudioModel: ObservableObject {
     
     // MARK: - Safety Check
     
+    /// レイテンシーを計測・更新
+    private func updateLatencyMeasurement() {
+        let inputNode = audioEngine.inputNode
+        
+        // サンプルレートを取得
+        let format = inputNode.outputFormat(forBus: 0)
+        let sampleRate = format.sampleRate
+        
+        guard sampleRate > 0 else {
+            print("レイテンシー計測: 無効なサンプルレート")
+            return
+        }
+        
+        // CoreAudioからバッファサイズを取得
+        var bufferFrameSize: UInt32 = 0
+        var propertySize = UInt32(MemoryLayout<UInt32>.size)
+        
+        // 入力デバイスのバッファサイズを取得
+        if let inputDeviceID = selectedInputDevice?.id {
+            var propertyAddress = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyBufferFrameSize,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            
+            AudioObjectGetPropertyData(
+                inputDeviceID,
+                &propertyAddress,
+                0,
+                nil,
+                &propertySize,
+                &bufferFrameSize
+            )
+        }
+        
+        // デフォルト値（256フレーム）
+        if bufferFrameSize == 0 {
+            bufferFrameSize = 256
+        }
+        
+        // レイテンシー計算: 入力バッファ + 出力バッファ（往復）
+        // 実際のレイテンシー = バッファサイズ * 2 / サンプルレート * 1000 (ms)
+        let bufferLatency = Double(bufferFrameSize) * 2.0 / sampleRate * 1000.0
+        
+        // 追加のシステム遅延（約1-2ms）を加算
+        latencyMs = bufferLatency + 1.5
+        
+        print("レイテンシー計測: bufferSize=\(bufferFrameSize), sampleRate=\(sampleRate), latency=\(String(format: "%.1f", latencyMs))ms")
+    }
+    
     private func checkBuiltInSpeakerWarning() {
         if selectedOutputDevice?.isBuiltInSpeaker == true {
             showBuiltInSpeakerWarning = true
@@ -443,41 +614,4 @@ class AudioModel: ObservableObject {
         }
     }
     
-    // MARK: - Device Control (CoreAudio)
-    
-    private func setAudioInputDevice(_ deviceID: AudioDeviceID) {
-        var deviceID = deviceID
-        var propertyAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultInputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        
-        AudioObjectSetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject),
-            &propertyAddress,
-            0,
-            nil,
-            UInt32(MemoryLayout<AudioDeviceID>.size),
-            &deviceID
-        )
-    }
-    
-    private func setAudioOutputDevice(_ deviceID: AudioDeviceID) {
-        var deviceID = deviceID
-        var propertyAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        
-        AudioObjectSetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject),
-            &propertyAddress,
-            0,
-            nil,
-            UInt32(MemoryLayout<AudioDeviceID>.size),
-            &deviceID
-        )
-    }
 }
